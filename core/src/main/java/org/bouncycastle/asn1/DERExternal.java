@@ -84,7 +84,7 @@ public class DERExternal
      */
     public DERExternal(ASN1ObjectIdentifier directReference, ASN1Integer indirectReference, ASN1Primitive dataValueDescriptor, DERTaggedObject externalData)
     {
-        this(directReference, indirectReference, dataValueDescriptor, externalData.getTagNo(), externalData.toASN1Primitive());
+        this(directReference, indirectReference, dataValueDescriptor, externalData.getTagNo(), externalData.getObject());
     }
 
     /**
@@ -102,7 +102,7 @@ public class DERExternal
         setIndirectReference(indirectReference);
         setDataValueDescriptor(dataValueDescriptor);
         setEncoding(encoding);
-        setExternalContent(externalData.toASN1Primitive());
+        setExternalContent(externalData);
     }
 
     /* (non-Javadoc)
@@ -135,7 +135,24 @@ public class DERExternal
     int encodedLength()
         throws IOException
     {
-        return this.getEncoded().length;
+        // computed from the components rather than by encoding the whole structure, as
+        // a full encoding per call is exponential in the nesting depth of EXTERNALs.
+        int length = 0;
+        if (directReference != null)
+        {
+            length += directReference.toDERObject().encodedLength();
+        }
+        if (indirectReference != null)
+        {
+            length += indirectReference.toDERObject().encodedLength();
+        }
+        if (dataValueDescriptor != null)
+        {
+            length += dataValueDescriptor.toDERObject().encodedLength();
+        }
+        length += new DERTaggedObject(true, encoding, externalContent).encodedLength();
+
+        return 1 + StreamUtil.calculateBodyLength(length) + length;
     }
 
     /* (non-Javadoc)
