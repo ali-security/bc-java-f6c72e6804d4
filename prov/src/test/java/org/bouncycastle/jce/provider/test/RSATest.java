@@ -7,6 +7,7 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.math.BigInteger;
 import java.security.AlgorithmParameters;
+import java.security.InvalidKeyException;
 import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -28,6 +29,7 @@ import java.security.spec.RSAPublicKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.HashSet;
 
+import javax.crypto.BadPaddingException;
 import javax.crypto.Cipher;
 import javax.crypto.NoSuchPaddingException;
 import javax.crypto.spec.OAEPParameterSpec;
@@ -47,6 +49,7 @@ import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.asn1.x509.DigestInfo;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
 import org.bouncycastle.asn1.x509.X509ObjectIdentifiers;
+import org.bouncycastle.jcajce.spec.TLSRSAPremasterSecretParameterSpec;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.util.Arrays;
 import org.bouncycastle.util.encoders.Hex;
@@ -708,6 +711,8 @@ public class RSATest
 
         testGetExceptionsPKCS1();
         zeroMessageTest();
+        tlsRsaPremasterSecretTest(priv2048Key, pub2048Key);
+        tlsRsaPremasterSecretTest(noCrtKey, KeyFactory.getInstance("RSA", "BC").generatePublic(pubKeySpec));
 
         oaepDigestCheck("SHA3-224", NISTObjectIdentifiers.id_sha3_224, pub2048Key, priv2048Key, rand, Hex.decode("2aa7812d4f7b7766f8625feb58481ef5b5fa6dfafbea543e4bbba89d6708f4900fc9fd55d5c2b83fefefc67e2ba7a4222217efaa9b9d31920bdcd78733319aca910dfd118aae5e901a6d27a56e37b1a6f86e7404f82da248e77845e58b789f10a1af8a1208f77dda384692609339346c4ea57928b890042e7d70b1d5817f8978dcbc9cd2fcdde37a0a41a52dbef701ddc859a5d58efd10aa5bd8d205c10154db906540bf20dedcff721df11a456df201cb9cbbd092a89a1eb3f11e7e34003d7070e02c8db54e5498e7ee262fb9178f5eb85d1db66baafe0a66e8283df9c41bded218e5d906d28f08803deb3cbd1a92777d55fe56ff022a47f673cac2ca145973"));
         oaepDigestCheck("SHA3-256", NISTObjectIdentifiers.id_sha3_256, pub2048Key, priv2048Key, rand, Hex.decode("4460e68586ac0ca1832274919c6b9159d40ea1d383a32ca28f0e1a81962289c8c904fa117d90afd7bfefa51b6889d2d999efb72bafd4beb5594bb08f62532ecb077e4968f43e70673341e60649ed64ac49cf1a2396a64577767d8958217a251938a7ac1bbc1aec9c9197a2eb9a375c74a01097fe3717c8bde04f8a20df85ef10a59070970a4a6470131654cecb641d46e464f17ddfe7e0595025bf25f025edbd56b19487cfc87de1642ca5190f289cf78e2c4b1cf90e73ffae331581c23febcf490c32299f2e5bd5a354a0cc996cc692b5a318777d17e734b3c487ad615df7af0fc361af564e6970ee0aa9b140634cdcf1eda91d1a1156326caaa608c4d43ee4"));
@@ -787,6 +792,133 @@ public class RSATest
             }
         }
         isTrue("exception count wrong", 1 == exceptions.size());
+    }
+
+    /*
+     * CVE-2024-30171: RSA PKCS#1 v1.5 decryption of a TLS pre-master secret must never reveal, by
+     * exception or by output, whether the padding or the version check failed.
+     */
+    private void tlsRsaPremasterSecretTest(PrivateKey privKey, PublicKey pubKey)
+        throws Exception
+    {
+        SecureRandom random = new SecureRandom();
+        int version = 0x0303;
+        TLSRSAPremasterSecretParameterSpec tlsSpec = new TLSRSAPremasterSecretParameterSpec(version);
+
+        byte[] pms = new byte[48];
+        random.nextBytes(pms);
+        pms[0] = 0x03;
+        pms[1] = 0x03;
+
+        Cipher c = Cipher.getInstance("RSA/NONE/PKCS1Padding", "BC");
+
+        c.init(Cipher.ENCRYPT_MODE, pubKey, random);
+
+        byte[] encPms = c.doFinal(pms);
+
+        c.init(Cipher.DECRYPT_MODE, privKey, tlsSpec, random);
+
+        isTrue("TLS PMS decryption failed", Arrays.areEqual(pms, c.doFinal(encPms)));
+
+        c = Cipher.getInstance("RSA/ECB/PKCS1Padding", "BC");
+
+        c.init(Cipher.DECRYPT_MODE, privKey, tlsSpec);
+
+        isTrue("TLS PMS decryption failed (default random)", Arrays.areEqual(pms, c.doFinal(encPms)));
+
+        byte[] embeddedEncPms = Arrays.concatenate(new byte[3], encPms, new byte[5]);
+
+        isTrue("TLS PMS decryption failed (input offset)", Arrays.areEqual(pms, c.doFinal(embeddedEncPms, 3, encPms.length)));
+
+        Cipher rawCipher = Cipher.getInstance("RSA/NONE/NoPadding", "BC");
+
+        rawCipher.init(Cipher.DECRYPT_MODE, privKey, tlsSpec, random);
+
+        isTrue("TLS PMS decryption failed (raw cipher)", Arrays.areEqual(pms, rawCipher.doFinal(encPms)));
+
+        // version mismatch: random pre-master secret, no exception
+        c.init(Cipher.DECRYPT_MODE, privKey, new TLSRSAPremasterSecretParameterSpec(0x0302), random);
+
+        checkTlsRandomPms("version mismatch", c, encPms, pms);
+
+        // badly padded block: random pre-master secret in TLS mode, BadPaddingException otherwise
+        int modLength = (((RSAPublicKey)pubKey).getModulus().bitLength() + 7) / 8;
+        byte[] badBlock = new byte[modLength];
+        badBlock[1] = 0x01;
+        for (int i = 2; i < modLength - 49; ++i)
+        {
+            badBlock[i] = (byte)0xff;
+        }
+        System.arraycopy(pms, 0, badBlock, modLength - 48, 48);
+
+        rawCipher.init(Cipher.ENCRYPT_MODE, pubKey, random);
+
+        byte[] badEncPms = rawCipher.doFinal(badBlock);
+
+        c.init(Cipher.DECRYPT_MODE, privKey, tlsSpec, random);
+
+        checkTlsRandomPms("bad padding", c, badEncPms, pms);
+
+        c.init(Cipher.DECRYPT_MODE, privKey, random);
+
+        try
+        {
+            c.doFinal(badEncPms);
+            fail("bad PKCS1 padding not detected");
+        }
+        catch (BadPaddingException e)
+        {
+            // expected
+        }
+
+        // ciphertext out of range for the modulus
+        byte[] oversized = new byte[modLength];
+        Arrays.fill(oversized, (byte)0xff);
+
+        c.init(Cipher.DECRYPT_MODE, privKey, tlsSpec, random);
+
+        checkTlsRandomPms("ciphertext >= modulus", c, oversized, pms);
+
+        // TLS mode is decryption with an RSA private key only, in a single doFinal()
+        try
+        {
+            c.init(Cipher.DECRYPT_MODE, pubKey, tlsSpec, random);
+            fail("public key accepted for TLS PMS decryption");
+        }
+        catch (InvalidKeyException e)
+        {
+            // expected
+        }
+
+        c.init(Cipher.DECRYPT_MODE, privKey, tlsSpec, random);
+
+        try
+        {
+            c.update(encPms);
+            fail("update() accepted in TLS mode");
+        }
+        catch (IllegalStateException e)
+        {
+            // expected
+        }
+
+        // re-initialising without the parameter spec restores normal PKCS#1 decryption
+        c.init(Cipher.DECRYPT_MODE, privKey, random);
+
+        byte[] plain = c.doFinal(encPms);
+
+        isTrue("PKCS1 decryption failed after TLS mode", Arrays.areEqual(pms, plain));
+    }
+
+    private void checkTlsRandomPms(String label, Cipher c, byte[] encPms, byte[] pms)
+        throws Exception
+    {
+        byte[] r1 = c.doFinal(encPms);
+        byte[] r2 = c.doFinal(encPms);
+
+        isTrue(label + ": wrong PMS length", r1.length == 48 && r2.length == 48);
+        isTrue(label + ": decrypted value returned", !Arrays.areEqual(pms, r1) && !Arrays.areEqual(pms, r2));
+        isTrue(label + ": fallback PMS not random", !Arrays.areEqual(r1, r2));
     }
 
     public void zeroMessageTest()

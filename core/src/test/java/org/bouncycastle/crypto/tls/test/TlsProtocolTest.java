@@ -7,6 +7,7 @@ import java.security.SecureRandom;
 
 import junit.framework.TestCase;
 
+import org.bouncycastle.crypto.tls.CipherSuite;
 import org.bouncycastle.crypto.tls.TlsClientProtocol;
 import org.bouncycastle.crypto.tls.TlsServerProtocol;
 import org.bouncycastle.util.Arrays;
@@ -35,6 +36,64 @@ public class TlsProtocolTest
         clientProtocol.connect(client);
 
         // NOTE: Because we write-all before we read-any, this length can't be more than the pipe capacity
+        int length = 1000;
+
+        byte[] data = new byte[length];
+        secureRandom.nextBytes(data);
+
+        OutputStream output = clientProtocol.getOutputStream();
+        output.write(data);
+
+        byte[] echo = new byte[data.length];
+        int count = Streams.readFully(clientProtocol.getInputStream(), echo);
+
+        assertEquals(count, data.length);
+        assertTrue(Arrays.areEqual(data, echo));
+
+        output.close();
+
+        serverThread.join();
+    }
+
+    /*
+     * The server decrypts the RSA-encrypted pre-master secret via TlsRSAUtils.safeDecryptPreMasterSecret, which must
+     * recover a correctly encrypted, correctly versioned pre-master secret (CVE-2024-30171).
+     */
+    public void testClientServerRSAKeyExchange()
+        throws Exception
+    {
+        SecureRandom secureRandom = new SecureRandom();
+
+        PipedInputStream clientRead = new PipedInputStream();
+        PipedInputStream serverRead = new PipedInputStream();
+        PipedOutputStream clientWrite = new PipedOutputStream(serverRead);
+        PipedOutputStream serverWrite = new PipedOutputStream(clientRead);
+
+        TlsClientProtocol clientProtocol = new TlsClientProtocol(clientRead, clientWrite, secureRandom);
+        TlsServerProtocol serverProtocol = new TlsServerProtocol(serverRead, serverWrite, secureRandom);
+
+        ServerThread serverThread = new ServerThread(serverProtocol);
+        serverThread.start();
+
+        final int[] negotiatedCipherSuite = new int[]{ -1 };
+
+        MockTlsClient client = new MockTlsClient(null)
+        {
+            public int[] getCipherSuites()
+            {
+                return new int[]{ CipherSuite.TLS_RSA_WITH_AES_128_CBC_SHA };
+            }
+
+            public void notifySelectedCipherSuite(int cipherSuite)
+            {
+                super.notifySelectedCipherSuite(cipherSuite);
+                negotiatedCipherSuite[0] = cipherSuite;
+            }
+        };
+        clientProtocol.connect(client);
+
+        assertEquals(CipherSuite.TLS_RSA_WITH_AES_128_CBC_SHA, negotiatedCipherSuite[0]);
+
         int length = 1000;
 
         byte[] data = new byte[length];
