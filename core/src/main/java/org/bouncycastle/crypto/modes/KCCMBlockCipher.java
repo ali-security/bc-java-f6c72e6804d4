@@ -161,34 +161,45 @@ public class KCCMBlockCipher
         associatedText.write(in, inOff, len);
     }
 
-    private void processAAD(byte[] assocText, int assocOff, int assocLen, int dataLen)
+    private void processAssociatedText(int dataLen)
     {
-        if (assocLen - assocOff < engine.getBlockSize())
-        {
-            throw new IllegalArgumentException("authText buffer too short");
-        }
-        if (assocLen % engine.getBlockSize() != 0)
+        int aadLen = associatedText.size();
+
+        boolean hasAssocText = aadLen > 0;
+
+        if (hasAssocText && aadLen % engine.getBlockSize() != 0)
         {
             throw new IllegalArgumentException("padding not supported");
         }
 
+        // The G1 block binds the nonce, data length and MAC-size flag into the MAC and must be
+        // processed unconditionally. DSTU 7624 carries the associated-data-present indicator as a flag
+        // bit inside G1, so it is not a gate on computing G1: skipping G1 when no AAD is present leaves
+        // the MAC independent of the nonce and enables cross-nonce forgery.
         System.arraycopy(nonce, 0, G1, 0, nonce.length - Nb_ - 1);
 
         intToBytes(dataLen, buffer, 0); // for G1
 
         System.arraycopy(buffer, 0, G1, nonce.length - Nb_ - 1, BYTES_IN_INT);
 
-        G1[G1.length - 1] = getFlag(true, macSize);
+        G1[G1.length - 1] = getFlag(hasAssocText, macSize);
 
         engine.processBlock(G1, 0, macBlock, 0);
 
-        intToBytes(assocLen, buffer, 0); // for G2
-
-        if (assocLen <= engine.getBlockSize() - Nb_)
+        if (!hasAssocText)
         {
-            for (int byteIndex = 0; byteIndex < assocLen; byteIndex++)
+            return;
+        }
+
+        intToBytes(aadLen, buffer, 0); // for G2
+
+        byte[] aad = associatedText.getBuffer();
+
+        if (aadLen <= engine.getBlockSize() - Nb_)
+        {
+            for (int byteIndex = 0; byteIndex < aadLen; byteIndex++)
             {
-                buffer[byteIndex + Nb_] ^= assocText[assocOff + byteIndex];
+                buffer[byteIndex + Nb_] ^= aad[byteIndex];
             }
 
             for (int byteIndex = 0; byteIndex < engine.getBlockSize(); byteIndex++)
@@ -208,12 +219,13 @@ public class KCCMBlockCipher
 
         engine.processBlock(macBlock, 0, macBlock, 0);
 
-        int authLen = assocLen;
+        int assocOff = 0;
+        int authLen = aadLen;
         while (authLen != 0)
         {
             for (int byteIndex = 0; byteIndex < engine.getBlockSize(); byteIndex++)
             {
-                macBlock[byteIndex] ^= assocText[byteIndex + assocOff];
+                macBlock[byteIndex] ^= aad[byteIndex + assocOff];
             }
 
             engine.processBlock(macBlock, 0, macBlock, 0);
@@ -255,17 +267,9 @@ public class KCCMBlockCipher
             throw new OutputLengthException("output buffer too short");
         }
 
-        if (associatedText.size() > 0)
-        {
-            if (forEncryption)
-            {
-                processAAD(associatedText.getBuffer(), 0, associatedText.size(), data.size());
-            }
-            else
-            {
-                processAAD(associatedText.getBuffer(), 0, associatedText.size(), data.size() - macSize);
-            }
-        }
+        // the plaintext length goes into G1, taken from this call's input rather than the doFinal buffer
+        // so that processPacket gives the same result whichever way it is reached.
+        processAssociatedText(forEncryption ? len : len - macSize);
 
         if (forEncryption)
         {
