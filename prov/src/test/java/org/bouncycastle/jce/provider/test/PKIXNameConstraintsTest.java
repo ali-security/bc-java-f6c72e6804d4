@@ -1,8 +1,11 @@
 package org.bouncycastle.jce.provider.test;
 
 import org.bouncycastle.asn1.DEROctetString;
+import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.asn1.x500.style.RFC4519Style;
 import org.bouncycastle.asn1.x509.GeneralName;
 import org.bouncycastle.asn1.x509.GeneralSubtree;
+import org.bouncycastle.asn1.x509.NameConstraintValidatorException;
 import org.bouncycastle.jce.provider.PKIXNameConstraintValidator;
 import org.bouncycastle.jce.provider.PKIXNameConstraintValidatorException;
 import org.bouncycastle.util.test.SimpleTest;
@@ -214,6 +217,298 @@ public class PKIXNameConstraintsTest
             uriintersect);
         testConstraints(GeneralName.iPAddress, testIP, testIPIsConstraint,
             testIPIsNotConstraint, ip1, ip2, ipunion, ipintersect);
+
+        testNameConstraintBypasses();
+    }
+
+    private void testNameConstraintBypasses()
+        throws Exception
+    {
+        // An RFC 1034 root-label trailing dot must not let a host escape an excluded rfc822Name or
+        // URI subtree, matching the dNSName canonicalisation.
+        PKIXNameConstraintValidator emailV = new PKIXNameConstraintValidator();
+        emailV.addExcludedSubtree(new GeneralSubtree(new GeneralName(GeneralName.rfc822Name, "bank.com")));
+        try
+        {
+            emailV.checkExcluded(new GeneralName(GeneralName.rfc822Name, "ceo@bank.com."));
+            fail("trailing-dot email must be caught by the excluded bank.com subtree");
+        }
+        catch (PKIXNameConstraintValidatorException e)
+        {
+            // expected
+        }
+
+        PKIXNameConstraintValidator uriV = new PKIXNameConstraintValidator();
+        uriV.addExcludedSubtree(new GeneralSubtree(new GeneralName(GeneralName.uniformResourceIdentifier, "competitor.example")));
+        try
+        {
+            uriV.checkExcluded(new GeneralName(GeneralName.uniformResourceIdentifier, "https://competitor.example./"));
+            fail("trailing-dot URI host must be caught by the excluded competitor.example subtree");
+        }
+        catch (PKIXNameConstraintValidatorException e)
+        {
+            // expected
+        }
+
+        PKIXNameConstraintValidator dnsV = new PKIXNameConstraintValidator();
+        dnsV.addExcludedSubtree(new GeneralSubtree(new GeneralName(GeneralName.dNSName, "example.com")));
+        try
+        {
+            dnsV.checkExcluded(new GeneralName(GeneralName.dNSName, "foo.example.com."));
+            fail("trailing-dot dNSName must be caught by the excluded example.com subtree");
+        }
+        catch (PKIXNameConstraintValidatorException e)
+        {
+            // expected
+        }
+
+        // A directoryName permitted constraint must match as an INITIAL PREFIX of the subject
+        // (RFC 5280 4.2.1.10), not as a subsequence at an arbitrary offset. Prepending an RDN ahead
+        // of the permitted sequence must not satisfy the constraint.
+        GeneralName permittedDN = new GeneralName(GeneralName.directoryName,
+            new X500Name(RFC4519Style.INSTANCE, "ou=permittedSubtree1, o=Test Certificates 2011, c=US"));
+        GeneralName prefixSubject = new GeneralName(GeneralName.directoryName,
+            new X500Name(RFC4519Style.INSTANCE, "cn=Valid DN nameConstraints EE Certificate Test1, ou=permittedSubtree1, o=Test Certificates 2011, c=US"));
+        GeneralName prependedSubject = new GeneralName(GeneralName.directoryName,
+            new X500Name(RFC4519Style.INSTANCE, "cn=Valid DN nameConstraints EE Certificate Test1, ou=permittedSubtree1, o=Test Certificates 2011, c=US, o=Injected"));
+
+        isTrue("prefix subject must be permitted", isPermitted(permittedDN, prefixSubject));
+        isTrue("subject with an RDN prepended before the permitted sequence must NOT be permitted",
+            !isPermitted(permittedDN, prependedSubject));
+
+        testNameConstraintBypassVariants();
+        testEmptyLabelRefused();
+    }
+
+    private void testNameConstraintBypassVariants()
+        throws Exception
+    {
+        // rfc822Name: every constraint form (mailbox, host, sub-domain) canonicalises the trailing dot
+        GeneralName mailbox = new GeneralName(GeneralName.rfc822Name, "ceo@bank.com");
+        isTrue("trailing-dot email must hit an excluded mailbox",
+            isExcluded(mailbox, new GeneralName(GeneralName.rfc822Name, "ceo@bank.com.")));
+        isTrue("other mailbox must not be excluded",
+            !isExcluded(mailbox, new GeneralName(GeneralName.rfc822Name, "cfo@bank.com.")));
+
+        GeneralName emailSubDomain = new GeneralName(GeneralName.rfc822Name, ".bank.com");
+        isTrue("trailing-dot email must hit an excluded sub-domain",
+            isExcluded(emailSubDomain, new GeneralName(GeneralName.rfc822Name, "ceo@mail.bank.com.")));
+        isTrue("trailing-dot email must hit an excluded host in upper case",
+            isExcluded(new GeneralName(GeneralName.rfc822Name, "bank.com"),
+                new GeneralName(GeneralName.rfc822Name, "ceo@BANK.COM.")));
+        isTrue("unrelated trailing-dot email must not be excluded",
+            !isExcluded(new GeneralName(GeneralName.rfc822Name, "bank.com"),
+                new GeneralName(GeneralName.rfc822Name, "ceo@example.com.")));
+        isTrue("trailing dot on a sub-domain constraint must still match",
+            isExcluded(new GeneralName(GeneralName.rfc822Name, ".bank.com."),
+                new GeneralName(GeneralName.rfc822Name, "ceo@mail.bank.com")));
+
+        GeneralName emailHost = new GeneralName(GeneralName.rfc822Name, "bank.com");
+        isTrue("trailing-dot email must stay inside a permitted host",
+            isPermitted(emailHost, new GeneralName(GeneralName.rfc822Name, "ceo@bank.com.")));
+        isTrue("trailing-dot email outside a permitted host must be rejected",
+            !isPermitted(emailHost, new GeneralName(GeneralName.rfc822Name, "ceo@evil.com.")));
+
+        // uniformResourceIdentifier: host and sub-domain constraints, with and without a port
+        GeneralName uriHost = new GeneralName(GeneralName.uniformResourceIdentifier, "competitor.example");
+        isTrue("trailing-dot URI host with port must be excluded",
+            isExcluded(uriHost, new GeneralName(GeneralName.uniformResourceIdentifier, "https://competitor.example.:443/path")));
+        isTrue("unrelated trailing-dot URI host must not be excluded",
+            !isExcluded(uriHost, new GeneralName(GeneralName.uniformResourceIdentifier, "https://friend.example./")));
+
+        GeneralName uriSubDomain = new GeneralName(GeneralName.uniformResourceIdentifier, ".competitor.example");
+        isTrue("trailing-dot URI host must hit an excluded sub-domain",
+            isExcluded(uriSubDomain, new GeneralName(GeneralName.uniformResourceIdentifier, "https://www.competitor.example./")));
+        isTrue("trailing-dot URI host outside a permitted host must be rejected",
+            !isPermitted(uriHost, new GeneralName(GeneralName.uniformResourceIdentifier, "https://evil.example./")));
+
+        // dNSName: permitted side and a trailing dot on the constraint itself
+        GeneralName dnsDomain = new GeneralName(GeneralName.dNSName, "example.com");
+        isTrue("trailing-dot dNSName must stay inside a permitted domain",
+            isPermitted(dnsDomain, new GeneralName(GeneralName.dNSName, "foo.example.com.")));
+        isTrue("trailing-dot dNSName outside a permitted domain must be rejected",
+            !isPermitted(dnsDomain, new GeneralName(GeneralName.dNSName, "foo.evil.com.")));
+        isTrue("trailing-dot dNSName equal to an excluded domain must be excluded",
+            isExcluded(dnsDomain, new GeneralName(GeneralName.dNSName, "example.com.")));
+        isTrue("trailing dot on a dNSName constraint must still match",
+            isExcluded(new GeneralName(GeneralName.dNSName, "example.com."),
+                new GeneralName(GeneralName.dNSName, "foo.example.com")));
+
+        // directoryName: the example from the advisory, C=FR,O=Attacker,C=US,O=TrustedOrg,CN=x
+        GeneralName trustedOrg = new GeneralName(GeneralName.directoryName, new X500Name("C=US,O=TrustedOrg"));
+        isTrue("legitimate subject must be permitted",
+            isPermitted(trustedOrg, new GeneralName(GeneralName.directoryName, new X500Name("C=US,O=TrustedOrg,CN=x"))));
+        isTrue("subject with prepended RDNs must NOT be permitted",
+            !isPermitted(trustedOrg, new GeneralName(GeneralName.directoryName, new X500Name("C=FR,O=Attacker,C=US,O=TrustedOrg,CN=x"))));
+    }
+
+    /**
+     * Only the single root-label dot of RFC 1034 sec. 3.1 is canonicalized away. A host carrying any
+     * other empty label - a second trailing dot, a doubled dot, a leading dot - is not a name
+     * RFC 5280 sec. 4.2.1.6 admits, and stripping the extra dots would decide on the caller's behalf
+     * that "example.com.." names example.com. It is refused instead, in both directions, so it can
+     * neither escape an excluded subtree nor be admitted by a permitted one.
+     */
+    private void testEmptyLabelRefused()
+        throws Exception
+    {
+        // dNSName: every shape of empty label is refused, whichever domain the name appears to carry.
+        isTrue("two trailing dots must be refused",
+            isExcluded(dnsName("example.com"), dnsName("example.com..")));
+        isTrue("three trailing dots must be refused",
+            isExcluded(dnsName("example.com"), dnsName("example.com...")));
+        isTrue("a doubled inner dot must be refused",
+            isExcluded(dnsName("example.com"), dnsName("foo..example.com")));
+        isTrue("a leading dot must be refused",
+            isExcluded(dnsName("example.com"), dnsName(".example.com")));
+        isTrue("a sibling domain with an empty label must be refused too",
+            isExcluded(dnsName("example.com"), dnsName("notexample.com..")));
+
+        // the permitted direction refuses it as well, so canonicalizing has not admitted anything new.
+        isTrue("an empty label must not be permitted",
+            !isPermitted(dnsName("example.com"), dnsName("example.com..")));
+        isTrue("a well-formed name is still permitted",
+            isPermitted(dnsName("example.com"), dnsName("example.com.")));
+
+        // rfc822Name and URI share the guard, applied to the host.
+        isTrue("two trailing dots on a mail host must be refused",
+            isExcluded(emailName("bank.com"), emailName("ceo@bank.com..")));
+        isTrue("an empty label on a mail host must not be permitted",
+            !isPermitted(emailName("bank.com"), emailName("ceo@bank.com..")));
+        isTrue("two trailing dots on a URI host must be refused",
+            isExcluded(uriName("competitor.example"), uriName("https://competitor.example../")));
+        isTrue("an empty label on a URI host must not be permitted",
+            !isPermitted(uriName("competitor.example"), uriName("https://competitor.example../")));
+
+        // the guard is scoped to the host: a quoted local part may legally carry a doubled dot.
+        isTrue("a doubled dot in a quoted local part must not be refused, and the host still matches",
+            isExcluded(emailName("bank.com"), emailName("\"a..b\"@bank.com")));
+
+        // a bare "." is the root label, not an empty one, and is left alone.
+        isTrue("a bare root label must not be refused", !isExcluded(dnsName("example.com"), dnsName(".")));
+
+        // nothing is refused where no constraint of that type is in force.
+        isTrue("an empty label is immaterial with no dNSName constraint",
+            !isExcluded(emailName("bank.com"), dnsName("example.com..")));
+    }
+
+    private static GeneralName dnsName(String name)
+    {
+        return new GeneralName(GeneralName.dNSName, name);
+    }
+
+    private static GeneralName emailName(String name)
+    {
+        return new GeneralName(GeneralName.rfc822Name, name);
+    }
+
+    private static GeneralName uriName(String name)
+    {
+        return new GeneralName(GeneralName.uniformResourceIdentifier, name);
+    }
+
+    /**
+     * Check exclusion against both validator copies - the provider's
+     * org.bouncycastle.jce.provider one used for cert path validation and the public
+     * org.bouncycastle.asn1.x509 one - and require them to agree.
+     */
+    private boolean isExcluded(GeneralName constraint, GeneralName name)
+        throws Exception
+    {
+        boolean excluded = isExcludedByProvider(constraint, name);
+
+        if (excluded != isExcludedByAsn1(constraint, name))
+        {
+            fail("asn1.x509 validator disagrees on exclusion of " + name + " by " + constraint);
+        }
+
+        return excluded;
+    }
+
+    /**
+     * Check permission against both validator copies and require them to agree.
+     */
+    private boolean isPermitted(GeneralName constraint, GeneralName name)
+        throws Exception
+    {
+        boolean permitted = isPermittedByProvider(constraint, name);
+
+        if (permitted != isPermittedByAsn1(constraint, name))
+        {
+            fail("asn1.x509 validator disagrees on permission of " + name + " by " + constraint);
+        }
+
+        return permitted;
+    }
+
+    private boolean isExcludedByProvider(GeneralName constraint, GeneralName name)
+        throws Exception
+    {
+        PKIXNameConstraintValidator constraintValidator = new PKIXNameConstraintValidator();
+        constraintValidator.addExcludedSubtree(new GeneralSubtree(constraint));
+
+        try
+        {
+            constraintValidator.checkExcluded(name);
+            return false;
+        }
+        catch (PKIXNameConstraintValidatorException e)
+        {
+            return true;
+        }
+    }
+
+    private boolean isPermittedByProvider(GeneralName constraint, GeneralName name)
+        throws Exception
+    {
+        PKIXNameConstraintValidator constraintValidator = new PKIXNameConstraintValidator();
+        constraintValidator.intersectPermittedSubtree(new GeneralSubtree(constraint));
+
+        try
+        {
+            constraintValidator.checkPermitted(name);
+            return true;
+        }
+        catch (PKIXNameConstraintValidatorException e)
+        {
+            return false;
+        }
+    }
+
+    private boolean isExcludedByAsn1(GeneralName constraint, GeneralName name)
+        throws Exception
+    {
+        org.bouncycastle.asn1.x509.PKIXNameConstraintValidator constraintValidator =
+            new org.bouncycastle.asn1.x509.PKIXNameConstraintValidator();
+        constraintValidator.addExcludedSubtree(new GeneralSubtree(constraint));
+
+        try
+        {
+            constraintValidator.checkExcluded(name);
+            return false;
+        }
+        catch (NameConstraintValidatorException e)
+        {
+            return true;
+        }
+    }
+
+    private boolean isPermittedByAsn1(GeneralName constraint, GeneralName name)
+        throws Exception
+    {
+        org.bouncycastle.asn1.x509.PKIXNameConstraintValidator constraintValidator =
+            new org.bouncycastle.asn1.x509.PKIXNameConstraintValidator();
+        constraintValidator.intersectPermittedSubtree(new GeneralSubtree(constraint));
+
+        try
+        {
+            constraintValidator.checkPermitted(name);
+            return true;
+        }
+        catch (NameConstraintValidatorException e)
+        {
+            return false;
+        }
     }
 
     /**

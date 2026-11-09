@@ -7,6 +7,7 @@ import java.math.BigInteger;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.security.InvalidKeyException;
+import java.security.KeyPair;
 import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
 import java.security.Principal;
@@ -71,8 +72,12 @@ import org.bouncycastle.asn1.x500.style.RFC4519Style;
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.asn1.x509.BasicConstraints;
 import org.bouncycastle.asn1.x509.Extension;
+import org.bouncycastle.asn1.x509.ExtensionsGenerator;
 import org.bouncycastle.asn1.x509.GeneralName;
+import org.bouncycastle.asn1.x509.GeneralNames;
+import org.bouncycastle.asn1.x509.GeneralSubtree;
 import org.bouncycastle.asn1.x509.KeyUsage;
+import org.bouncycastle.asn1.x509.NameConstraints;
 import org.bouncycastle.asn1.x509.X509CertificateStructure;
 import org.bouncycastle.asn1.x509.X509Extension;
 import org.bouncycastle.asn1.x509.X509Extensions;
@@ -486,6 +491,80 @@ public class CertPathValidatorTest
         validateWithExtendedKeyUsage();
         testEmptyPath();
         checkInvalidCertPath();
+        checkNameConstraintBypass();
+    }
+
+    /**
+     * An intermediate CA carrying an excluded dNSName subtree of example.com must not be able to
+     * issue an end-entity certificate that escapes it with an RFC 1034 root-label trailing dot
+     * ("foo.example.com.") or an empty label ("foo..example.com", "example.com..") in the
+     * subjectAltName.
+     */
+    private void checkNameConstraintBypass()
+        throws Exception
+    {
+        KeyPair rootKp = TestUtils.generateRSAKeyPair();
+        KeyPair caKp = TestUtils.generateRSAKeyPair();
+        KeyPair eeKp = TestUtils.generateRSAKeyPair();
+
+        X500Name rootName = new X500Name("CN=Name Constraints Test Root");
+        X500Name caName = new X500Name("CN=Name Constraints Test CA");
+
+        X509Certificate rootCert = TestUtils.generateRootCert(rootKp, rootName);
+
+        ExtensionsGenerator extGen = new ExtensionsGenerator();
+        extGen.addExtension(Extension.basicConstraints, true, new BasicConstraints(0));
+        extGen.addExtension(Extension.keyUsage, true, new KeyUsage(KeyUsage.keyCertSign | KeyUsage.cRLSign));
+        extGen.addExtension(Extension.nameConstraints, true, new NameConstraints(null,
+            new GeneralSubtree[]{ new GeneralSubtree(new GeneralName(GeneralName.dNSName, "example.com")) }));
+
+        X509Certificate caCert = TestUtils.createCert(rootName, rootKp.getPrivate(), caName, "SHA256withRSA",
+            extGen.generate(), caKp.getPublic());
+
+        // control: a name outside the excluded subtree validates
+        validateDNSNamePath(rootCert, caCert, caName, caKp, eeKp, "foo.other.com");
+
+        String[] bypasses = { "foo.example.com", "example.com.", "foo.example.com.", "FOO.EXAMPLE.COM.",
+            "foo..example.com", "example.com..", ".example.com" };
+        for (int i = 0; i != bypasses.length; i++)
+        {
+            try
+            {
+                validateDNSNamePath(rootCert, caCert, caName, caKp, eeKp, bypasses[i]);
+                fail("dNSName " + bypasses[i] + " escaped the excluded example.com subtree");
+            }
+            catch (CertPathValidatorException e)
+            {
+                isEquals("unexpected rejection of dNSName " + bypasses[i] + ": " + e.getMessage(),
+                    "Subtree check for certificate subject alternative name failed.", e.getMessage());
+            }
+        }
+    }
+
+    private void validateDNSNamePath(X509Certificate rootCert, X509Certificate caCert, X500Name caName,
+        KeyPair caKp, KeyPair eeKp, String dnsName)
+        throws Exception
+    {
+        ExtensionsGenerator extGen = new ExtensionsGenerator();
+        extGen.addExtension(Extension.subjectAlternativeName, false,
+            new GeneralNames(new GeneralName(GeneralName.dNSName, dnsName)));
+
+        X509Certificate eeCert = TestUtils.createCert(caName, caKp.getPrivate(),
+            new X500Name("CN=Name Constraints Test EE"), "SHA256withRSA", extGen.generate(), eeKp.getPublic());
+
+        List certchain = new ArrayList();
+        certchain.add(eeCert);
+        certchain.add(caCert);
+
+        CertPath cp = CertificateFactory.getInstance("X.509", "BC").generateCertPath(certchain);
+        Set trust = new HashSet();
+        trust.add(new TrustAnchor(rootCert, null));
+
+        CertPathValidator cpv = CertPathValidator.getInstance("PKIX", "BC");
+        PKIXParameters param = new PKIXParameters(trust);
+        param.setRevocationEnabled(false);
+
+        cpv.validate(cp, param);
     }
 
     // extended key usage chain

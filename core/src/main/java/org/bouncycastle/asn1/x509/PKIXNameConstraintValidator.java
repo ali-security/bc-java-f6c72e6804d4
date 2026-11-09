@@ -819,10 +819,12 @@ public class PKIXNameConstraintValidator
     private void checkPermittedEmail(Set permitted, String email)
         throws NameConstraintValidatorException
     {
-        if (permitted == null)
+        if (permitted == null || (email.length() == 0 && permitted.size() == 0))
         {
             return;
         }
+
+        checkNoEmptyLabel(emailHost(email), "Subject email address host");
 
         Iterator it = permitted.iterator();
 
@@ -834,11 +836,6 @@ public class PKIXNameConstraintValidator
             {
                 return;
             }
-        }
-
-        if (email.length() == 0 && permitted.size() == 0)
-        {
-            return;
         }
 
         throw new NameConstraintValidatorException(
@@ -899,6 +896,8 @@ public class PKIXNameConstraintValidator
             return;
         }
 
+        checkNoEmptyLabel(emailHost(email), "Subject email address host");
+
         Iterator it = excluded.iterator();
 
         while (it.hasNext())
@@ -911,6 +910,17 @@ public class PKIXNameConstraintValidator
                     "Email address is from an excluded subtree.");
             }
         }
+    }
+
+    /**
+     * The host of a tested rfc822Name, which is everything past the '@' - or the whole value when
+     * there is none, the form a bare domain takes. This is the host {@link #emailIsConstrained}
+     * compares; the local part is deliberately left out, since a quoted one may legally carry the
+     * doubled dot {@link #checkNoEmptyLabel} refuses in a host.
+     */
+    private static String emailHost(String email)
+    {
+        return email.substring(email.indexOf('@') + 1);
     }
 
     /**
@@ -1028,11 +1038,14 @@ public class PKIXNameConstraintValidator
 
     private boolean emailIsConstrained(String email, String constraint)
     {
-        String sub = email.substring(email.indexOf('@') + 1);
+        // RFC 1034 root-label trailing dot: apply a canonicalisation to the rfc822Name host so a
+        // trailing dot (e.g. "user@bank.com.") cannot slip a leaf past an excluded/permitted
+        // "bank.com" constraint.
+        String sub = stripTrailingDot(email.substring(email.indexOf('@') + 1));
         // a particular mailbox
         if (constraint.indexOf('@') != -1)
         {
-            if (email.equalsIgnoreCase(constraint))
+            if (stripTrailingDot(email).equalsIgnoreCase(stripTrailingDot(constraint)))
             {
                 return true;
             }
@@ -1040,7 +1053,7 @@ public class PKIXNameConstraintValidator
         // on particular host
         else if (!(constraint.charAt(0) == '.'))
         {
-            if (sub.equalsIgnoreCase(constraint))
+            if (sub.equalsIgnoreCase(stripTrailingDot(constraint)))
             {
                 return true;
             }
@@ -1053,6 +1066,46 @@ public class PKIXNameConstraintValidator
         return false;
     }
 
+    /**
+     * Removes an RFC 1034 root-label trailing dot from a host name, so that "bank.com." and
+     * "bank.com" canonicalise to the same value before a name constraint comparison is made.
+     */
+    private static String stripTrailingDot(String s)
+    {
+        if (s != null)
+        {
+            int sLast = s.length() - 1;
+            if (sLast > 0 && s.charAt(sLast) == '.')
+            {
+                return s.substring(0, sLast);
+            }
+        }
+        return s;
+    }
+
+    /**
+     * A tested host must carry no empty label. RFC 1034 sec. 3.5 admits none but the root, so the
+     * single trailing dot of a fully-qualified name is legal - and {@link #stripTrailingDot} removes
+     * it - while a leading dot, a doubled dot or a second trailing dot is not a name RFC 5280
+     * sec. 4.2.1.6 admits. Such a value is refused rather than canonicalised: deciding that
+     * "example.com.." names example.com would be this validator's guess, and a consumer resolving or
+     * comparing the name does not read it that way, so a name it cannot match is failed closed. This
+     * applies to tested names only - a constraint may legitimately begin with a dot, which is how
+     * this implementation spells "subdomains only".
+     *
+     * @param host the host part of the tested name.
+     * @param nameType how to describe the name in the exception message.
+     * @throws NameConstraintValidatorException if the host carries an empty label.
+     */
+    private static void checkNoEmptyLabel(String host, String nameType)
+        throws NameConstraintValidatorException
+    {
+        if (host.indexOf("..") >= 0 || (host.length() > 1 && host.charAt(0) == '.'))
+        {
+            throw new NameConstraintValidatorException(nameType + " has an empty label.");
+        }
+    }
+
     private boolean withinDomain(String testDomain, String domain)
     {
         String tempDomain = domain;
@@ -1060,6 +1113,10 @@ public class PKIXNameConstraintValidator
         {
             tempDomain = tempDomain.substring(1);
         }
+        // Strip the RFC 1034 root-label trailing dot so the per-label compare doesn't see a
+        // phantom empty label (e.g. a ".bank.com." sub-domain constraint).
+        testDomain = stripTrailingDot(testDomain);
+        tempDomain = stripTrailingDot(tempDomain);
         String[] domainParts = Strings.split(tempDomain, '.');
         String[] testDomainParts = Strings.split(testDomain, '.');
         // must have at least one subdomain
@@ -1088,10 +1145,12 @@ public class PKIXNameConstraintValidator
     private void checkPermittedDNS(Set permitted, String dns)
         throws NameConstraintValidatorException
     {
-        if (permitted == null)
+        if (permitted == null || (dns.length() == 0 && permitted.size() == 0))
         {
             return;
         }
+
+        checkNoEmptyLabel(dns, "DNS name");
 
         Iterator it = permitted.iterator();
 
@@ -1100,14 +1159,10 @@ public class PKIXNameConstraintValidator
             String str = ((String)it.next());
 
             // is sub domain
-            if (withinDomain(dns, str) || dns.equalsIgnoreCase(str))
+            if (isDNSConstrained(str, dns))
             {
                 return;
             }
-        }
-        if (dns.length() == 0 && permitted.size() == 0)
-        {
-            return;
         }
         throw new NameConstraintValidatorException(
             "DNS is not from a permitted subtree.");
@@ -1121,6 +1176,8 @@ public class PKIXNameConstraintValidator
             return;
         }
 
+        checkNoEmptyLabel(dns, "DNS name");
+
         Iterator it = excluded.iterator();
 
         while (it.hasNext())
@@ -1128,12 +1185,24 @@ public class PKIXNameConstraintValidator
             String str = ((String)it.next());
 
             // is sub domain or the same
-            if (withinDomain(dns, str) || dns.equalsIgnoreCase(str))
+            if (isDNSConstrained(str, dns))
             {
                 throw new NameConstraintValidatorException(
                     "DNS is from an excluded subtree.");
             }
         }
+    }
+
+    private boolean isDNSConstrained(String constraint, String dns)
+    {
+        // RFC 1034 root-label trailing dot: a dNSName such as "foo.example.com." must be
+        // canonicalised before matching, otherwise withinDomain splits it to
+        // [..., "com", ""] and the misaligned per-label compare returns "not constrained",
+        // letting the leaf escape an excluded/permitted "example.com" subtree. Matches the
+        // rfc822Name/URI canonicalisation added for CVE-2026-8763.
+        String normDns = stripTrailingDot(dns);
+        String normConstraint = stripTrailingDot(constraint);
+        return normDns.equalsIgnoreCase(normConstraint) || withinDomain(normDns, normConstraint);
     }
 
     /**
@@ -1606,6 +1675,8 @@ public class PKIXNameConstraintValidator
             return;
         }
 
+        checkNoEmptyLabel(extractHostFromURL(uri), "URI host");
+
         Iterator it = excluded.iterator();
 
         while (it.hasNext())
@@ -1771,10 +1842,12 @@ public class PKIXNameConstraintValidator
     private void checkPermittedURI(Set permitted, String uri)
         throws NameConstraintValidatorException
     {
-        if (permitted == null)
+        if (permitted == null || (uri.length() == 0 && permitted.size() == 0))
         {
             return;
         }
+
+        checkNoEmptyLabel(extractHostFromURL(uri), "URI host");
 
         Iterator it = permitted.iterator();
 
@@ -1787,21 +1860,19 @@ public class PKIXNameConstraintValidator
                 return;
             }
         }
-        if (uri.length() == 0 && permitted.size() == 0)
-        {
-            return;
-        }
         throw new NameConstraintValidatorException(
             "URI is not from a permitted subtree.");
     }
 
     private boolean isUriConstrained(String uri, String constraint)
     {
-        String host = extractHostFromURL(uri);
+        // Strip an RFC 1034 root-label trailing dot from the host, matching the rfc822Name path, so a
+        // URI host such as "competitor.example." cannot slip past a "competitor.example" constraint.
+        String host = stripTrailingDot(extractHostFromURL(uri));
         // a host
         if (!constraint.startsWith("."))
         {
-            if (host.equalsIgnoreCase(constraint))
+            if (host.equalsIgnoreCase(stripTrailingDot(constraint)))
             {
                 return true;
             }
