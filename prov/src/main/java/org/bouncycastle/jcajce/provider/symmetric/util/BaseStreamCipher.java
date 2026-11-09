@@ -195,6 +195,7 @@ public class BaseStreamCipher
             }
             else if (params instanceof PBEParameterSpec)
             {
+                PBE.Util.checkIterationCount(params);
                 param = PBE.Util.makePBEParameters(k, params, cipher.getAlgorithmName());
                 pbeSpec = (PBEParameterSpec)params;
             }

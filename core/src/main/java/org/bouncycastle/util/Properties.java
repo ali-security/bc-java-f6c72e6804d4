@@ -34,14 +34,19 @@ public class Properties
     public static final String BKS_ENABLE_V1 = "org.bouncycastle.bks.enable_v1";
 
     /**
-     * Upper bound on the PBKDF2 iteration count honoured when BC takes that count from an
+     * Upper bound on the PBE iteration count honoured when BC takes that count from an
      * untrusted encoding: the raw JCA PBKDF2 provider (both the {@code SecretKeyFactory}
      * derivation - which is what decrypting a PBES2-protected PKCS#8 / PEM private key or PKCS#12
      * bag uses - and the {@code AlgorithmParameters} parse a {@code Cipher} performs for PBES2).
-     * In each case the key-derivation parameters travel inside an unauthenticated container, so an
-     * unbounded count makes processing attacker-supplied material a CPU-exhaustion vector. Default
-     * 10,000,000 - the count RFC 8018 sec. 4.2 names as possibly appropriate for especially
-     * critical keys, so generous enough for deliberately strong settings. Read via
+     * It also bounds the legacy PBES1 (PKCS#5 scheme 1) and PKCS#12 PBE families in the raw JCA
+     * provider: the {@code AlgorithmParameters} parse, and every {@code Cipher}, {@code Mac} and
+     * {@code SecretKeyFactory} derivation, whichever provider decoded the parameters. In each case
+     * the key-derivation parameters travel inside an unauthenticated container, so an unbounded
+     * count makes processing attacker-supplied material a CPU-exhaustion vector. The PKCS#12 key
+     * store derives through the same provider code, so an
+     * {@code org.bouncycastle.pkcs12.max_it_count} raised above this bound needs this one raised
+     * too. Default 10,000,000 - the count RFC 8018 sec. 4.2 names as possibly appropriate for
+     * especially critical keys, so generous enough for deliberately strong settings. Read via
      * {@link #asInteger(String, int)}.
      */
     public static final String PBE_MAX_ITERATION_COUNT = "org.bouncycastle.pbe.max_iteration_count";
