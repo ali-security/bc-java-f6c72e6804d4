@@ -1,5 +1,6 @@
 package org.bouncycastle.jce.provider.test;
 
+import java.math.BigInteger;
 import java.security.AlgorithmParameters;
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
@@ -20,6 +21,10 @@ import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.PBEParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
+import org.bouncycastle.asn1.ASN1Encodable;
+import org.bouncycastle.asn1.ASN1Integer;
+import org.bouncycastle.asn1.DEROctetString;
+import org.bouncycastle.asn1.DERSequence;
 import org.bouncycastle.asn1.bc.BCObjectIdentifiers;
 import org.bouncycastle.crypto.Digest;
 import org.bouncycastle.crypto.PBEParametersGenerator;
@@ -668,6 +673,7 @@ public class PBETest
         }
 
         testPKCS12Interop();
+        testIterationCountLimit();
 
         testPBEHMac("PBEWithHMacSHA1", hMac1);
         testPBEHMac("PBEWithHMacRIPEMD160", hMac2);
@@ -808,6 +814,85 @@ public class PBETest
         return "PBETest";
     }
 
+
+    private void testIterationCountLimit()
+        throws Exception
+    {
+        byte[] salt = new byte[16];
+        char[] password = "hello".toCharArray();
+
+        // Lower the cap for the test so the without-cap derivation stays cheap.
+        System.setProperty(org.bouncycastle.util.Properties.PBE_MAX_ITERATION_COUNT, "1000");
+        try
+        {
+            // Cap at the derivation engine (SecretKeyFactory).
+            try
+            {
+                SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256", "BC").generateSecret(
+                    new PBEKeySpec(password, salt, 2000, 256));
+                fail("no exception on over-limit PBKDF2 iteration count");
+            }
+            catch (java.security.spec.InvalidKeySpecException e)
+            {
+                isTrue(e.getMessage().startsWith("iteration count"));
+            }
+
+            // Cap at the untrusted-parameter parse (AlgorithmParameters.init - the raw Cipher path).
+            byte[] encoded = new org.bouncycastle.asn1.pkcs.PBKDF2Params(salt, 2000).getEncoded();
+            try
+            {
+                AlgorithmParameters.getInstance("PBKDF2", "BC").init(encoded);
+                fail("no exception on over-limit PBKDF2 parameters");
+            }
+            catch (java.io.IOException e)
+            {
+                isTrue(e.getMessage().startsWith("iteration count"));
+            }
+
+            // A count within the limit still works.
+            SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256", "BC").generateSecret(
+                new PBEKeySpec(password, salt, 500, 256));
+        }
+        finally
+        {
+            System.getProperties().remove(org.bouncycastle.util.Properties.PBE_MAX_ITERATION_COUNT);
+        }
+
+        // Under the default cap (10,000,000) attacker-sized counts are refused before any
+        // derivation runs.
+        try
+        {
+            SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256", "BC").generateSecret(
+                new PBEKeySpec(password, salt, Integer.MAX_VALUE, 256));
+            fail("no exception on 2^31-1 PBKDF2 iteration count");
+        }
+        catch (java.security.spec.InvalidKeySpecException e)
+        {
+            isTrue(e.getMessage(), e.getMessage().equals("iteration count (2147483647) greater than 10000000"));
+        }
+
+        // values beyond the int range must not wrap past the check
+        BigInteger[] hostile = { BigInteger.valueOf(10000001), BigInteger.valueOf(Integer.MAX_VALUE),
+            BigInteger.ONE.shiftLeft(32).add(BigInteger.valueOf(1000)) };
+        for (int i = 0; i != hostile.length; i++)
+        {
+            byte[] encoded = new DERSequence(new ASN1Encodable[]{
+                new DEROctetString(salt), new ASN1Integer(hostile[i]) }).getEncoded();
+            try
+            {
+                AlgorithmParameters.getInstance("PBKDF2", "BC").init(encoded);
+                fail("no exception on over-limit PBKDF2 parameters: " + hostile[i]);
+            }
+            catch (java.io.IOException e)
+            {
+                isTrue(e.getMessage(), e.getMessage().equals("iteration count (" + hostile[i] + ") greater than 10000000"));
+            }
+        }
+
+        // a count at the default cap is still accepted by the parameter parse
+        AlgorithmParameters.getInstance("PBKDF2", "BC").init(
+            new org.bouncycastle.asn1.pkcs.PBKDF2Params(salt, 10000000).getEncoded());
+    }
 
     public static void main(
         String[]    args)
