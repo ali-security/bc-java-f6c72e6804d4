@@ -6,7 +6,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.math.BigInteger;
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
 import java.security.Key;
@@ -99,13 +98,13 @@ import org.bouncycastle.jcajce.spec.GOST28147ParameterSpec;
 import org.bouncycastle.jcajce.spec.PBKDF2KeySpec;
 import org.bouncycastle.jcajce.util.BCJcaJceHelper;
 import org.bouncycastle.jcajce.util.JcaJceHelper;
+import org.bouncycastle.jce.PKCS12Util;
 import org.bouncycastle.jce.interfaces.BCKeyStore;
 import org.bouncycastle.jce.interfaces.PKCS12BagAttributeCarrier;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.jce.provider.JDKPKCS12StoreParameter;
 import org.bouncycastle.util.Arrays;
 import org.bouncycastle.util.Integers;
-import org.bouncycastle.util.Properties;
 import org.bouncycastle.util.Strings;
 import org.bouncycastle.util.encoders.Hex;
 
@@ -113,8 +112,6 @@ public class PKCS12KeyStoreSpi
     extends KeyStoreSpi
     implements PKCSObjectIdentifiers, X509ObjectIdentifiers, BCKeyStore
 {
-    static final String PKCS12_MAX_IT_COUNT_PROPERTY = "org.bouncycastle.pkcs12.max_it_count";
-
     private final JcaJceHelper helper = new BCJcaJceHelper();
 
     private static final int SALT_SIZE = 20;
@@ -623,7 +620,7 @@ public class PKCS12KeyStoreSpi
                 PKCS12PBEParams pbeParams = PKCS12PBEParams.getInstance(algId.getParameters());
                 PBEParameterSpec defParams = new PBEParameterSpec(
                     pbeParams.getIV(),
-                    validateIterationCount(pbeParams.getIterations()));
+                    PKCS12Util.validateIterationCount(pbeParams.getIterations()));
 
                 Cipher cipher = helper.createCipher(algorithm.getId());
 
@@ -666,7 +663,7 @@ public class PKCS12KeyStoreSpi
             SecretKeyFactory keyFact =  helper.createSecretKeyFactory(algorithm);
             PBEParameterSpec defParams = new PBEParameterSpec(
                 pbeParams.getIV(),
-                pbeParams.getIterations().intValue());
+                PKCS12Util.validateIterationCount(pbeParams.getIterations()));
 
             Cipher cipher = helper.createCipher(algorithm);
 
@@ -700,7 +697,7 @@ public class PKCS12KeyStoreSpi
             {
                 PBEParameterSpec defParams = new PBEParameterSpec(
                     pbeParams.getIV(),
-                    pbeParams.getIterations().intValue());
+                    PKCS12Util.validateIterationCount(pbeParams.getIterations()));
                 PKCS12Key key = new PKCS12Key(password, wrongPKCS12Zero);
 
                 Cipher cipher = helper.createCipher(algorithm.getId());
@@ -744,11 +741,11 @@ public class PKCS12KeyStoreSpi
 
         if (func.isDefaultPrf())
         {
-            key = keyFact.generateSecret(new PBEKeySpec(password, func.getSalt(), validateIterationCount(func.getIterationCount()), keySizeProvider.getKeySize(encScheme)));
+            key = keyFact.generateSecret(new PBEKeySpec(password, func.getSalt(), PKCS12Util.validateIterationCount(func.getIterationCount()), keySizeProvider.getKeySize(encScheme)));
         }
         else
         {
-            key = keyFact.generateSecret(new PBKDF2KeySpec(password, func.getSalt(), validateIterationCount(func.getIterationCount()), keySizeProvider.getKeySize(encScheme), func.getPrf()));
+            key = keyFact.generateSecret(new PBKDF2KeySpec(password, func.getSalt(), PKCS12Util.validateIterationCount(func.getIterationCount()), keySizeProvider.getKeySize(encScheme), func.getPrf()));
         }
 
         Cipher cipher = Cipher.getInstance(alg.getEncryptionScheme().getAlgorithm().getId());
@@ -819,7 +816,7 @@ public class PKCS12KeyStoreSpi
             DigestInfo dInfo = mData.getMac();
             macAlgorithm = dInfo.getAlgorithmId();
             byte[] salt = mData.getSalt();
-            itCount = validateIterationCount(mData.getIterationCount());
+            itCount = PKCS12Util.validateIterationCount(mData.getIterationCount());
             saltLength = salt.length;
 
             byte[] data = ((ASN1OctetString)info.getContent()).getOctets();
@@ -1226,27 +1223,6 @@ public class PKCS12KeyStoreSpi
                 }
             }
         }
-    }
-
-    private int validateIterationCount(BigInteger i)
-    {
-        int count = i.intValue();
-
-        if (count < 0)
-        {
-            throw new IllegalStateException("negative iteration count found");
-        }
-
-        BigInteger maxValue = Properties.asBigInteger(PKCS12_MAX_IT_COUNT_PROPERTY);
-        if (maxValue != null)
-        {
-            if (maxValue.intValue() < count)
-            {
-                throw new IllegalStateException("iteration count " + count + " greater than " + maxValue.intValue());
-            }
-        }
-
-        return count;
     }
 
     public void engineStore(LoadStoreParameter param)
