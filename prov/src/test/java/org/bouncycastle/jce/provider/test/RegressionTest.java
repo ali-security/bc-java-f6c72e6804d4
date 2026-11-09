@@ -40,6 +40,7 @@ public class RegressionTest
         new PKCS10CertRequestTest(),
         new EncryptedPrivateKeyInfoTest(),
         new KeyStoreTest(),
+        new LDAPUtilsTest(),
         new PKCS12StoreTest(),
         new DigestTest(),
         new PSSTest(),
