@@ -7,6 +7,7 @@ import java.util.Hashtable;
 import java.util.Vector;
 
 import org.bouncycastle.util.Integers;
+import org.bouncycastle.util.Properties;
 
 class DTLSReliableHandshake
 {
@@ -27,9 +28,14 @@ class DTLSReliableHandshake
 
     private int message_seq = 0, next_receive_seq = 0;
 
+    private int maxHandshakeMessageSize;
+
     DTLSReliableHandshake(TlsContext context, DTLSRecordLayer transport)
     {
         this.recordLayer = transport;
+        // Same default and floor as the (D)TLS API's peer limit; overridable like the JSSE providers.
+        this.maxHandshakeMessageSize = Math.max(1024,
+            Properties.asInteger("jdk.tls.maxHandshakeMessageSize", 32768));
         this.handshakeHash = new DeferredHash();
         this.handshakeHash.init(context);
     }
@@ -242,6 +248,15 @@ class DTLSReliableHandshake
             if (fragment_offset + fragment_length > length)
             {
                 // NOTE: Malformed fragment - ignore it and the rest of the record
+                break;
+            }
+
+            if (length > maxHandshakeMessageSize)
+            {
+                // NOTE: Declared message length exceeds the configured maximum - ignore it (and
+                // the rest of the record) rather than committing a reassembly buffer of that size.
+                // The reassembler is sized from this attacker-controlled length before any
+                // signature/Finished verification, so an unbounded value is a memory-exhaustion DoS.
                 break;
             }
 

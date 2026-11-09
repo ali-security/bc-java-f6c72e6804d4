@@ -21,6 +21,7 @@ public class AllTests
 
         suite.addTestSuite(BasicTlsTest.class);
         suite.addTestSuite(DTLSProtocolTest.class);
+        suite.addTestSuite(org.bouncycastle.crypto.tls.DTLSReliableHandshakeBoundTest.class);
         suite.addTestSuite(DTLSTestCase.class);
         suite.addTestSuite(TlsProtocolTest.class);
         suite.addTestSuite(TlsProtocolNonBlockingTest.class);
