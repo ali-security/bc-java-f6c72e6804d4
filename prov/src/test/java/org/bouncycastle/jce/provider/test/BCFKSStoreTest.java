@@ -46,6 +46,7 @@ import org.bouncycastle.crypto.util.ScryptConfig;
 import org.bouncycastle.jcajce.BCFKSStoreParameter;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.util.Arrays;
+import org.bouncycastle.util.Properties;
 import org.bouncycastle.util.encoders.Base64;
 import org.bouncycastle.util.encoders.Hex;
 import org.bouncycastle.util.test.SimpleTest;
@@ -972,6 +973,147 @@ public class BCFKSStoreTest
         doStoreUsingPBKDF2(PBKDF2Config.PRF_SHA3_512);
     }
 
+    // The integrity-MAC key is derived from KDF parameters carried in the (not-yet-verified)
+    // keystore, so an attacker-supplied cost must be bounded before the derivation runs. Stored
+    // here with modest costs, then loaded with the bound lowered below them to confirm the guard
+    // fires before the (expensive) derivation.
+    private void shouldRejectExcessiveMacKdfCost()
+        throws Exception
+    {
+        byte[] pbkdf2Enc = doStoreUsingStoreParameter(new PBKDF2Config.Builder()
+            .withPRF(PBKDF2Config.PRF_SHA512)
+            .withIterationCount(1024)
+            .withSaltLength(20).build());
+
+        String oldIt = System.getProperty(Properties.BCFKS_MAX_IT_COUNT);
+        System.setProperty(Properties.BCFKS_MAX_IT_COUNT, "100");
+        try
+        {
+            KeyStore ks = KeyStore.getInstance("BCFKS", "BC");
+            ks.load(new ByteArrayInputStream(pbkdf2Enc), testPassword);
+            fail("excessive BCFKS MAC iteration count accepted");
+        }
+        catch (IOException e)
+        {
+            isTrue("unexpected message: " + e.getMessage(), e.getMessage().indexOf("greater than 100") >= 0);
+        }
+        finally
+        {
+            restoreProperty(Properties.BCFKS_MAX_IT_COUNT, oldIt);
+        }
+
+        byte[] scryptEnc = doStoreUsingStoreParameter(new ScryptConfig.Builder(1024, 8, 1)
+            .withSaltLength(20).build());
+
+        String oldMem = System.getProperty(Properties.BCFKS_MAX_SCRYPT_MEMORY);
+        System.setProperty(Properties.BCFKS_MAX_SCRYPT_MEMORY, "1024");
+        try
+        {
+            KeyStore ks = KeyStore.getInstance("BCFKS", "BC");
+            ks.load(new ByteArrayInputStream(scryptEnc), testPassword);
+            fail("excessive BCFKS scrypt cost accepted");
+        }
+        catch (IOException e)
+        {
+            isTrue("unexpected message: " + e.getMessage(),
+                e.getMessage().indexOf("scrypt cost parameters require more than") >= 0);
+        }
+        finally
+        {
+            restoreProperty(Properties.BCFKS_MAX_SCRYPT_MEMORY, oldMem);
+        }
+    }
+
+    private static void restoreProperty(String name, String old)
+    {
+        if (old == null)
+        {
+            System.clearProperty(name);
+        }
+        else
+        {
+            System.setProperty(name, old);
+        }
+    }
+
+    // An attacker able to modify a .bcfks file controls the integrity-MAC KDF parameters, and these
+    // are honoured before the MAC is compared. Rewrite them to abusive values (the MAC itself is left
+    // as-is, so it will not match) and confirm that, with the default bounds in place, the load is
+    // refused up front instead of first running the CPU/memory intensive derivation.
+    private void shouldRejectTamperedMacKdfCost()
+        throws Exception
+    {
+        byte[] pbkdf2Enc = doStoreUsingStoreParameter(new PBKDF2Config.Builder()
+            .withPRF(PBKDF2Config.PRF_SHA512)
+            .withIterationCount(1024)
+            .withSaltLength(20).build());
+
+        ObjectStore store = ObjectStore.getInstance(pbkdf2Enc);
+        PbkdMacIntegrityCheck macCheck = PbkdMacIntegrityCheck.getInstance(store.getIntegrityCheck().getIntegrityCheck());
+        PBKDF2Params pbkdf2Params = PBKDF2Params.getInstance(macCheck.getPbkdAlgorithm().getParameters());
+        byte[] salt = pbkdf2Params.getSalt();
+        int keyLength = pbkdf2Params.getKeyLength().intValue();
+        AlgorithmIdentifier prf = pbkdf2Params.getPrf();
+
+        // just over the default PBKDF2 bound of 5,000,000
+        checkTamperedMacKdfRejected(store, macCheck, new KeyDerivationFunc(PKCSObjectIdentifiers.id_PBKDF2,
+            new PBKDF2Params(salt, 5000001, keyLength, prf)), "iteration count (5000001) greater than 5000000");
+        // iterationCount = 2^31-1, minutes-to-hours of CPU if honoured
+        checkTamperedMacKdfRejected(store, macCheck, new KeyDerivationFunc(PKCSObjectIdentifiers.id_PBKDF2,
+            new PBKDF2Params(salt, Integer.MAX_VALUE, keyLength, prf)), "greater than 5000000");
+        // nonsensical iteration count
+        checkTamperedMacKdfRejected(store, macCheck, new KeyDerivationFunc(PKCSObjectIdentifiers.id_PBKDF2,
+            new PBKDF2Params(salt, -1, keyLength, prf)), "invalid iteration count");
+
+        byte[] scryptEnc = doStoreUsingStoreParameter(new ScryptConfig.Builder(1024, 8, 1)
+            .withSaltLength(20).build());
+
+        store = ObjectStore.getInstance(scryptEnc);
+        macCheck = PbkdMacIntegrityCheck.getInstance(store.getIntegrityCheck().getIntegrityCheck());
+        ScryptParams sParams = ScryptParams.getInstance(macCheck.getPbkdAlgorithm().getParameters());
+        salt = sParams.getSalt();
+        BigInteger sKeyLength = sParams.getKeyLength();
+        BigInteger one = BigInteger.valueOf(1);
+
+        // N = 2^21, r = 8: ~2 GiB of working memory, just over the default 1 GiB bound
+        checkTamperedMacKdfRejected(store, macCheck, new KeyDerivationFunc(MiscObjectIdentifiers.id_scrypt,
+            new ScryptParams(salt, BigInteger.valueOf(1 << 21), BigInteger.valueOf(8), one, sKeyLength)),
+            "scrypt cost parameters require more than 1073741824 bytes");
+        // N = 2^30, r = 8: ~1 TiB of working memory
+        checkTamperedMacKdfRejected(store, macCheck, new KeyDerivationFunc(MiscObjectIdentifiers.id_scrypt,
+            new ScryptParams(salt, BigInteger.valueOf(1 << 30), BigInteger.valueOf(8), one, sKeyLength)),
+            "scrypt cost parameters require more than 1073741824 bytes");
+        // oversized r - also used as the parallelization parameter, so a CPU vector on its own
+        checkTamperedMacKdfRejected(store, macCheck, new KeyDerivationFunc(MiscObjectIdentifiers.id_scrypt,
+            new ScryptParams(salt, BigInteger.valueOf(2), BigInteger.valueOf(1 << 20), one, sKeyLength)),
+            "scrypt block size (1048576) greater than 1024");
+        // N / r outside of the int range
+        checkTamperedMacKdfRejected(store, macCheck, new KeyDerivationFunc(MiscObjectIdentifiers.id_scrypt,
+            new ScryptParams(salt, one.shiftLeft(40), BigInteger.valueOf(8), one, sKeyLength)),
+            "invalid scrypt parameters");
+        checkTamperedMacKdfRejected(store, macCheck, new KeyDerivationFunc(MiscObjectIdentifiers.id_scrypt,
+            new ScryptParams(salt, BigInteger.valueOf(1024), one.shiftLeft(40), one, sKeyLength)),
+            "invalid scrypt parameters");
+    }
+
+    private void checkTamperedMacKdfRejected(ObjectStore store, PbkdMacIntegrityCheck macCheck, KeyDerivationFunc tamperedKdf, String expected)
+        throws Exception
+    {
+        byte[] tampered = new ObjectStore(EncryptedObjectStoreData.getInstance(store.getStoreData()),
+            new ObjectStoreIntegrityCheck(new PbkdMacIntegrityCheck(macCheck.getMacAlgorithm(), tamperedKdf, macCheck.getMac()))).getEncoded();
+
+        try
+        {
+            KeyStore ks = KeyStore.getInstance("BCFKS", "BC");
+            ks.load(new ByteArrayInputStream(tampered), testPassword);
+            fail("tampered BCFKS MAC KDF cost accepted");
+        }
+        catch (IOException e)
+        {
+            isTrue("unexpected message: " + e.getMessage(), e.getMessage().indexOf(expected) >= 0);
+        }
+    }
+
     // The MAC key size is taken from the same not-yet-verified KDF parameters as the cost, and
     // sizes the derivation output, so an attacker-supplied keyLength has to be bounded too. It is
     // also multiplied by 8 at the derivation call, which overflows for a large enough value and
@@ -1149,7 +1291,9 @@ public class BCFKSStoreTest
         shouldStoreSecretKeys();
         shouldStoreUsingSCRYPT();
         shouldStoreUsingPBKDF2();
+        shouldRejectExcessiveMacKdfCost();
         shouldRejectExcessiveMacKeyLength();
+        shouldRejectTamperedMacKdfCost();
         shouldFailOnWrongPassword();
         shouldParseKWPKeyStore();
     }
