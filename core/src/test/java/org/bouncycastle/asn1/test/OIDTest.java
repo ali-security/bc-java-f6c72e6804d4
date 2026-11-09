@@ -7,7 +7,10 @@ import java.io.IOException;
 import org.bouncycastle.asn1.ASN1InputStream;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.asn1.ASN1OutputStream;
+import org.bouncycastle.asn1.ASN1StreamParser;
+import org.bouncycastle.asn1.DEROctetString;
 import org.bouncycastle.asn1.DEROutputStream;
+import org.bouncycastle.asn1.DERTaggedObject;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.util.encoders.Hex;
 import org.bouncycastle.util.test.SimpleTest;
@@ -118,6 +121,125 @@ public class OIDTest
         }
     }
 
+    private static byte[] encodeOid(int contentsLength)
+    {
+        // 06 82 LL LL followed by contentsLength single-octet subidentifiers
+        byte[] enc = new byte[4 + contentsLength];
+        enc[0] = 0x06;
+        enc[1] = (byte)0x82;
+        enc[2] = (byte)(contentsLength >> 8);
+        enc[3] = (byte)contentsLength;
+        for (int i = 4; i < enc.length; i++)
+        {
+            enc[i] = 0x01;
+        }
+        return enc;
+    }
+
+    private static String repeatedOid(String stem, int count)
+    {
+        StringBuffer sb = new StringBuffer(stem);
+        for (int i = 0; i < count; i++)
+        {
+            sb.append(".1");
+        }
+        return sb.toString();
+    }
+
+    private void contentsLengthLimitCheck()
+        throws IOException
+    {
+        // CVE-2025-8885: OID contents are limited to 4096 octets
+        ASN1ObjectIdentifier maxOid = (ASN1ObjectIdentifier)new ASN1InputStream(encodeOid(4096)).readObject();
+        isTrue("4096 octet OID not parsed", maxOid.getEncoded().length == 4 + 4096);
+
+        try
+        {
+            new ASN1InputStream(encodeOid(4097)).readObject();
+            fail("no exception on 4097 octet OID");
+        }
+        catch (IOException e)
+        {
+            isTrue("unexpected cause: " + e.getCause(), e.getCause() instanceof IllegalArgumentException
+                && "exceeded OID contents length limit".equals(e.getCause().getMessage()));
+        }
+
+        try
+        {
+            ASN1ObjectIdentifier.getInstance(encodeOid(4097));
+            fail("no exception on 4097 octet OID via getInstance");
+        }
+        catch (IllegalArgumentException e)
+        {
+            // expected
+        }
+
+        try
+        {
+            new ASN1StreamParser(encodeOid(4097)).readObject();
+            fail("no exception on 4097 octet OID via stream parser");
+        }
+        catch (IOException e)
+        {
+            isTrue("unexpected cause: " + e.getCause(), e.getCause() instanceof IllegalArgumentException
+                && "exceeded OID contents length limit".equals(e.getCause().getMessage()));
+        }
+
+        byte[] longContents = new byte[4097];
+        for (int i = 0; i < longContents.length; i++)
+        {
+            longContents[i] = 0x01;
+        }
+        try
+        {
+            ASN1ObjectIdentifier.getInstance(new DERTaggedObject(false, 0, new DEROctetString(longContents)), false);
+            fail("no exception on 4097 octet implicitly tagged OID");
+        }
+        catch (IllegalArgumentException e)
+        {
+            isEquals("exceeded OID contents length limit", e.getMessage());
+        }
+
+        // "0.1" encodes as a single octet, every further ".1" adds one octet
+        isTrue(new ASN1ObjectIdentifier(repeatedOid("0.1", 4095)).getEncoded().length == 4 + 4096);
+        try
+        {
+            new ASN1ObjectIdentifier(repeatedOid("0.1", 4096));
+            fail("no exception on 4097 octet OID string");
+        }
+        catch (IllegalArgumentException e)
+        {
+            isEquals("exceeded OID contents length limit", e.getMessage());
+        }
+
+        StringBuffer longArc = new StringBuffer("1.2.");
+        for (int i = 0; i < 4 * 4096; i++)
+        {
+            longArc.append('9');
+        }
+        try
+        {
+            new ASN1ObjectIdentifier(longArc.toString());
+            fail("no exception on over-long OID string");
+        }
+        catch (IllegalArgumentException e)
+        {
+            isEquals("exceeded OID contents length limit", e.getMessage());
+        }
+
+        ASN1ObjectIdentifier stem = new ASN1ObjectIdentifier(repeatedOid("0.1", 4094));
+        isTrue(stem.branch("1").getEncoded().length == 4 + 4096);
+        try
+        {
+            stem.branch("1.1");
+            fail("no exception on 4097 octet OID branch");
+        }
+        catch (IllegalArgumentException e)
+        {
+            isEquals("exceeded OID contents length limit", e.getMessage());
+        }
+    }
+
     public void performTest()
         throws IOException
     {
@@ -155,6 +277,8 @@ public class OIDTest
         onCheck("1.12", "1.1.2", false);
         onCheck("1.1", "1.1.1", true);
         onCheck("1.1", "1.1.2", true);
+
+        contentsLengthLimitCheck();
     }
 
     public static void main(
