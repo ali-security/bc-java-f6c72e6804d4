@@ -1,3 +1,44 @@
-language: java
-jdk:
-  - openjdk8
+language: shell
+dist: jammy
+
+# The project ships build.gradle in Gradle 4 syntax (testCompile, `task ... <<`) and no
+# wrapper, so a current image's system Gradle cannot run it; install the JDK 8 + Gradle 4.10.3
+# toolchain explicitly and run the project's own test definition (subprojects' `*AllTests`
+# filter) for bcprov's modules, core and prov, one module per job.
+env:
+  jobs:
+    - TEST_TASKS=":core:test"
+    - TEST_TASKS=":prov:test"
+
+before_install:
+  - curl -fsSL -o /tmp/jdk8.tar.gz https://github.com/AdoptOpenJDK/openjdk8-binaries/releases/download/jdk8u292-b10/OpenJDK8U-jdk_x64_linux_hotspot_8u292b10.tar.gz
+  - mkdir -p $HOME/jdk8 && tar -xzf /tmp/jdk8.tar.gz -C $HOME/jdk8 --strip-components=1
+  - export JAVA_HOME=$HOME/jdk8
+  - curl -fsSL -o /tmp/gradle.zip https://services.gradle.org/distributions/gradle-4.10.3-bin.zip
+  - unzip -q /tmp/gradle.zip -d $HOME
+  - export PATH=$JAVA_HOME/bin:$HOME/gradle-4.10.3/bin:$PATH
+  # CVE-2025-8916 CheckNameConstraintsTest fixtures: upstream's mal-* certs from bc-test-data
+  # (added in r1rv79, not in this tag), pinned by sha256, placed where the test's
+  # getResourceAsStream resolves them.
+  - mkdir -p prov/src/test/resources/org/bouncycastle/jce/provider/test
+  - for f in mal-root mal-ca1 mal-ca2 mal-leaf; do curl -fsSL -o prov/src/test/resources/org/bouncycastle/jce/provider/test/$f.crt https://raw.githubusercontent.com/bcgit/bc-test-data/r1rv79/pkix/$f.crt; done
+  - |
+    (cd prov/src/test/resources/org/bouncycastle/jce/provider/test && printf '%s\n' \
+      'b716b63b59552ad4cdbc057010bcbb358a02160a104d8a61d1d9fe37c7c27fc4  mal-root.crt' \
+      'd57b061cd2f8ec0a21d226f3f6930404a7c8cc4a2fc2cda1e7161c26ec319d1f  mal-ca1.crt' \
+      'dd069af9c092d59cfc9f0c2b3086c8ff2aebb52069c7f5a34fa9424651e93195  mal-ca2.crt' \
+      'af143a9dbebdafb1a1e133aec4e825ef1807c73aa242255488b5ec55995fc6d5  mal-leaf.crt' \
+      | sha256sum -c -)
+  - java -version
+  - gradle --version
+
+install: true
+
+before_script:
+  - (while sleep 240; do echo "keepalive - tests still running"; done) &
+
+script:
+  - gradle --no-daemon --console=plain -s --init-script .travis/seal-test-logging.gradle $TEST_TASKS
+
+after_script:
+  - sh .travis/wait-for-log.sh gradle 900

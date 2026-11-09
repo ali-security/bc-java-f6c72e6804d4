@@ -1,0 +1,51 @@
+name: seal-build
+
+# Build-and-pack only: the test suite runs on Travis (.travis.yml).
+# The public bcprov-jdk15on-1.60.jar was compiled by Sun JDK 1.5.0_08 (class v49) with the
+# project's Ant build (ant/jdk15+.xml build-provider), so this mirrors that toolchain.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Sun JDK 1.5.0_22 and Ant 1.8.4
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o jdk5.bin https://archive.org/download/jdk-1_5_0_22-linux-i586/jdk-1_5_0_22-linux-amd64.bin
+          sh jdk5.bin < <(yes yes) > /dev/null
+          curl -fsSL -o ant.tar.gz https://archive.apache.org/dist/ant/binaries/apache-ant-1.8.4-bin.tar.gz
+          tar -xzf ant.tar.gz
+          echo "JAVA_HOME=$RUNNER_TEMP/jdk1.5.0_22" >> "$GITHUB_ENV"
+          echo "ANT_HOME=$RUNNER_TEMP/apache-ant-1.8.4" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/jdk1.5.0_22/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/apache-ant-1.8.4/bin" >> "$GITHUB_PATH"
+
+      - name: Build provider jar
+        env:
+          ANT_OPTS: -Xmx1g
+        run: |
+          set -euo pipefail
+          java -version
+          ant -version
+          ant -f ant/jdk15+.xml build-provider
+          JAR=build/artifacts/jdk1.5/jars/bcprov-jdk15on-160.jar
+          # The published jar carries META-INF/services/java.security.Provider; build-provider
+          # does not package it, so add it from prov/src/main/resources.
+          if ! unzip -l "$JAR" | grep -q 'META-INF/services/java.security.Provider'; then
+            jar uf "$JAR" -C prov/src/main/resources META-INF/services/java.security.Provider
+          fi
+          mkdir -p seal-out
+          cp "$JAR" seal-out/bcprov-jdk15on-1.60.jar
+          unzip -l seal-out/bcprov-jdk15on-1.60.jar | tail -1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bcprov-jdk15on-1.60
+          path: seal-out/bcprov-jdk15on-1.60.jar
+          if-no-files-found: error
