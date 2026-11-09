@@ -401,21 +401,18 @@ public class ASN1InputStream
         throws IOException
     {
         int len = defIn.getRemaining() / 2;
+
+        // Read the contents through Streams.readLenBytesFully, which grows its buffer as bytes
+        // actually arrive, rather than eagerly allocating new char[len]: a short crafted header
+        // declaring a huge BMPString length would otherwise drive a heap-sized allocation before any
+        // content was read (CWE-789). Exactly len * 2 bytes are consumed, as before, and a truncated
+        // stream still fails with the "DEF length ... object truncated by ..." EOFException.
+        byte[] bytes = Streams.readLenBytesFully(defIn, len * 2);
+
         char[] buf = new char[len];
-        int totalRead = 0;
-        while (totalRead < len)
+        for (int i = 0, bytePos = 0; i < len; ++i, bytePos += 2)
         {
-            int ch1 = defIn.read();
-            if (ch1 < 0)
-            {
-                break;
-            }
-            int ch2 = defIn.read();
-            if (ch2 < 0)
-            {
-                break;
-            }
-            buf[totalRead++] = (char)((ch1 << 8) | (ch2 & 0xff));
+            buf[i] = (char)(((bytes[bytePos] & 0xff) << 8) | (bytes[bytePos + 1] & 0xff));
         }
 
         return buf;

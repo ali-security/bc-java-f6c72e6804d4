@@ -75,7 +75,8 @@ public class RegressionTest
         new PolicyConstraintsTest(),
         new PollReqContentTest(),
         new DhSigStaticTest(),
-        new NestedEncodingTest()
+        new NestedEncodingTest(),
+        new DefiniteLengthAllocationTest()
     };
 
     public static void main(

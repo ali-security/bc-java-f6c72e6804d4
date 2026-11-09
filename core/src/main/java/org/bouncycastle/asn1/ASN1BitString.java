@@ -1,7 +1,6 @@
 package org.bouncycastle.asn1;
 
 import java.io.ByteArrayOutputStream;
-import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 
@@ -250,15 +249,13 @@ public abstract class ASN1BitString
         }
 
         int padBits = stream.read();
-        byte[] data = new byte[length - 1];
+        // Read the contents incrementally rather than pre-allocating new byte[length - 1]: a short
+        // crafted header declaring a huge BIT STRING length would otherwise drive a heap-sized
+        // allocation before any content was read (CWE-789).
+        byte[] data = Streams.readLenBytesFully(stream, length - 1);
 
         if (data.length != 0)
         {
-            if (Streams.readFully(stream, data) != data.length)
-            {
-                throw new EOFException("EOF encountered in middle of BIT STRING");
-            }
-
             if (padBits > 0 && padBits < 8)
             {
                 if (data[data.length - 1] != (byte)(data[data.length - 1] & (0xff << padBits)))
