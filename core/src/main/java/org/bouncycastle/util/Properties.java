@@ -114,6 +114,18 @@ public class Properties
         return null;
     }
 
+    public static int asInteger(String propertyName, int defaultValue)
+    {
+        String p = fetchProperty(propertyName);
+
+        if (p != null)
+        {
+            return Integer.parseInt(p);
+        }
+
+        return defaultValue;
+    }
+
     public static Set<String> asKeySet(String propertyName)
     {
         Set<String> set = new HashSet<String>();
