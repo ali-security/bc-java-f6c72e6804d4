@@ -20,6 +20,7 @@ import org.bouncycastle.asn1.DERSequence;
 import org.bouncycastle.asn1.x9.ECNamedCurveTable;
 import org.bouncycastle.asn1.x9.X9ECParameters;
 import org.bouncycastle.asn1.x9.X9FieldID;
+import org.bouncycastle.crypto.CryptoServicesRegistrar;
 import org.bouncycastle.crypto.ec.CustomNamedCurves;
 import org.bouncycastle.math.ec.ECAlgorithms;
 import org.bouncycastle.math.ec.ECConstants;
@@ -670,6 +671,106 @@ public class ECPointTest extends TestCase
         }
 
         return rv;
+    }
+
+    /**
+     * The inversion of the projective Z coordinate in {@link ECPoint#normalize()} must be blinded
+     * with a random multiplicative field element (CVE-2020-15522, see "Yet another GCD based
+     * inversion side-channel affecting ECC implementations" by Nir Drucker and Shay Gueron), and
+     * the blinding must not change the resulting affine point.
+     */
+    public void testNormalizeIsBlinded()
+    {
+        String[] names = new String[]{ "secp256r1", "secp384r1", "secp256k1", "sect163r2", "sect233k1", "sect283r1" };
+
+        SecureRandom previous = CryptoServicesRegistrar.getSecureRandom();
+        CountingSecureRandom counter = new CountingSecureRandom();
+        CryptoServicesRegistrar.setSecureRandom(counter);
+        try
+        {
+            for (int i = 0; i < names.length; ++i)
+            {
+                String name = names[i];
+
+                X9ECParameters x9A = ECNamedCurveTable.getByName(name);
+                assertNotNull(name, x9A);
+
+                BigInteger n = x9A.getN();
+                BigInteger k;
+                do
+                {
+                    k = new BigInteger(n.bitLength(), secRand);
+                }
+                while (k.signum() <= 0 || k.compareTo(n) >= 0);
+
+                // Reference result computed entirely in affine coordinates (no Z coordinate to invert)
+                ECCurve affineCurve = x9A.getCurve().configure().setCoordinateSystem(ECCurve.COORD_AFFINE).create();
+                ECPoint expected = affineCurve.importPoint(x9A.getG()).multiply(k);
+                assertTrue(name, expected.isNormalized());
+
+                // Generic curve in every supported projective coordinate system
+                ECCurve curveA = x9A.getCurve();
+                for (int coord = 0; coord < ECCurve.COORD_SKEWED; ++coord)
+                {
+                    if (coord == ECCurve.COORD_AFFINE || coord == ECCurve.COORD_LAMBDA_AFFINE
+                        || !curveA.supportsCoordinateSystem(coord))
+                    {
+                        continue;
+                    }
+
+                    ECCurve c = curveA.configure().setCoordinateSystem(coord).create();
+                    implTestNormalizeIsBlinded(name + " coord " + coord, c.importPoint(x9A.getG()), k, expected, counter);
+                }
+
+                // Custom (optimized) curve implementation
+                X9ECParameters x9B = CustomNamedCurves.getByName(name);
+                if (x9B != null)
+                {
+                    implTestNormalizeIsBlinded(name + " custom", x9B.getG(), k, expected, counter);
+                }
+            }
+        }
+        finally
+        {
+            CryptoServicesRegistrar.setSecureRandom(previous);
+        }
+    }
+
+    private void implTestNormalizeIsBlinded(String label, ECPoint g, BigInteger k, ECPoint expected,
+        CountingSecureRandom counter)
+    {
+        ECPoint p = g.multiply(k);
+        assertFalse(label + ": expected a projective (non-normalized) point", p.isNormalized());
+
+        counter.reset();
+        ECPoint q = p.normalize();
+
+        assertTrue(label + ": normalize() must draw randomness for blinding the Z inversion", counter.getCount() > 0);
+        assertTrue(label, q.isNormalized());
+        assertEquals(label, expected.getAffineXCoord().toBigInteger(), q.getAffineXCoord().toBigInteger());
+        assertEquals(label, expected.getAffineYCoord().toBigInteger(), q.getAffineYCoord().toBigInteger());
+    }
+
+    private static class CountingSecureRandom
+        extends SecureRandom
+    {
+        private int count = 0;
+
+        public void nextBytes(byte[] bytes)
+        {
+            ++count;
+            super.nextBytes(bytes);
+        }
+
+        int getCount()
+        {
+            return count;
+        }
+
+        void reset()
+        {
+            count = 0;
+        }
     }
 
     private void assertPointsEqual(String message, ECPoint a, ECPoint b)

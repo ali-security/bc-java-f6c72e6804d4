@@ -1,6 +1,7 @@
 package org.bouncycastle.math.ec;
 
 import java.math.BigInteger;
+import java.security.SecureRandom;
 import java.util.Hashtable;
 import java.util.Random;
 
@@ -107,6 +108,33 @@ public abstract class ECCurve
     public abstract ECFieldElement fromBigInteger(BigInteger x);
 
     public abstract boolean isValidFieldElement(BigInteger x);
+
+    ECFieldElement randomFieldElementMult(SecureRandom r)
+    {
+        /*
+         * NOTE: BigInteger comparisons in the rejection sampling are not constant-time, so we
+         * use the product of two independent elements to mitigate side-channels.
+         */
+        FiniteField field = getField();
+        BigInteger x1, x2;
+        if (ECAlgorithms.isFpField(field))
+        {
+            BigInteger p = field.getCharacteristic();
+            x1 = AbstractFp.implRandomFieldElementMult(r, p);
+            x2 = AbstractFp.implRandomFieldElementMult(r, p);
+        }
+        else if (ECAlgorithms.isF2mField(field))
+        {
+            int m = getFieldSize();
+            x1 = AbstractF2m.implRandomFieldElementMult(r, m);
+            x2 = AbstractF2m.implRandomFieldElementMult(r, m);
+        }
+        else
+        {
+            return fromBigInteger(ECConstants.ONE);
+        }
+        return fromBigInteger(x1).multiply(fromBigInteger(x2));
+    }
 
     public synchronized Config configure()
     {
@@ -614,6 +642,17 @@ public abstract class ECCurve
 
             return this.createRawPoint(x, y, true);
         }
+
+        static BigInteger implRandomFieldElementMult(SecureRandom r, BigInteger p)
+        {
+            BigInteger x;
+            do
+            {
+                x = new BigInteger(p.bitLength(), r);
+            }
+            while (x.signum() <= 0 || x.compareTo(p) >= 0);
+            return x;
+        }
     }
 
     /**
@@ -963,6 +1002,17 @@ public abstract class ECCurve
         public boolean isKoblitz()
         {
             return this.order != null && this.cofactor != null && this.b.isOne() && (this.a.isZero() || this.a.isOne());
+        }
+
+        static BigInteger implRandomFieldElementMult(SecureRandom r, int m)
+        {
+            BigInteger x;
+            do
+            {
+                x = new BigInteger(m, r);
+            }
+            while (x.signum() <= 0);
+            return x;
         }
     }
 
