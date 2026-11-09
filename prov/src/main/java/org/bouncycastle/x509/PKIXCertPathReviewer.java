@@ -88,6 +88,8 @@ public class PKIXCertPathReviewer extends CertPathValidatorUtilities
     private static final String AUTH_INFO_ACCESS = Extension.authorityInfoAccess.getId();
     
     private static final String RESOURCE_NAME = "org.bouncycastle.x509.CertPathReviewerMessages";
+
+    private static final int NAME_CHECK_MAX = (1 << 10);
     
     // input parameters
     
@@ -458,9 +460,15 @@ public class PKIXCertPathReviewer extends CertPathValidatorUtilities
                         ErrorBundle msg = new ErrorBundle(RESOURCE_NAME,"CertPathReviewer.subjAltNameExtError");
                         throw new CertPathReviewerException(msg,ae,certPath,index);
                     }
-                    
+
                     if (altName != null)
                     {
+                        if (altName.size() > NAME_CHECK_MAX)
+                        {
+                            ErrorBundle msg = new ErrorBundle(RESOURCE_NAME,"CertPathReviewer.subjAltNameExtError");
+                            throw new CertPathReviewerException(msg,certPath,index);
+                        }
+
                         for (int j = 0; j < altName.size(); j++)
                         {
                             GeneralName name = GeneralName.getInstance(altName.getObjectAt(j));
